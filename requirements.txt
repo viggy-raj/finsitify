@@ -1,4 +1,4 @@
-
+streamlit
 pandas
 numpy
 requests
@@ -11,4 +11,5 @@ transformers
 matplotlib
 yfinance
 fastapi
+
 uvicorn
