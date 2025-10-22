@@ -108,8 +108,8 @@ def run_full_pipeline(target_col: str = 'close', start_date: str = '2015-01-01',
         log_xgb = run_script("xgboost_model.py", ["--target", target_col])
         full_log += log_xgb + "\n"
         
-        # 4. Final Prediction & Combine (use the default 30 steps for prediction.py)
-        log_pred = run_script("predictions.py", ["--future", "30", "--retrain", "--plot"])
+        # 4. Final Prediction & Combine (Explicitly run without plotting on the server)
+        log_pred = run_script("predictions.py", ["--future", "30", "--retrain"]) # Removed --plot
         full_log += log_pred + "\n"
         
         return PipelineStatus(success=True, log_output=full_log)
@@ -135,8 +135,6 @@ def get_combined_predictions_timeseries():
     try:
         df = pd.read_csv(COMBO_PRED_FILE)
         # Assuming the combined prediction file has enough info for timeseries.
-        # If dates are needed, they would have to be handled in xgboost_model.py and predictions.py
-        # by preserving a date column from data.py. For simplicity, we return the records.
         return TimeseriesData(data=df.to_dict(orient="records"))
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error reading combined predictions file: {e}")
@@ -190,4 +188,5 @@ if __name__ == "__main__":
         logging.error(f"Initial pipeline run failed: {e}")
         # The API will still start but endpoints will return 404 until a run succeeds.
     
+    # Use a fixed port 8000 for standard server deployments
     uvicorn.run(app, host="0.0.0.0", port=int(os.getenv("PORT", 8000)))

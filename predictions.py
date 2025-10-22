@@ -22,7 +22,7 @@ Usage:
 Options:
   --future N     : project N future steps using linear trend on combined preds
   --retrain      : force retrain of the combiner model if enough samples
-  --plot         : show the plot (default: True)
+  --plot         : show the plot (default: False on server environments)
 
 """
 
@@ -33,9 +33,20 @@ import pandas as pd
 import numpy as np
 import joblib
 from sklearn.model_selection import train_test_split
-from sklearn.metrics import mean_squared_error, accuracy_score
+from sklearn.metrics import mean_squared_error
 from xgboost import XGBRegressor
-import matplotlib.pyplot as plt
+
+# Fix for headless environments: use Agg backend if plotting is enabled but no display
+import matplotlib
+try:
+    matplotlib.use('Agg') # Use non-GUI backend for server environments
+    import matplotlib.pyplot as plt
+    PLOTTING_ENABLED = True
+except ImportError:
+    PLOTTING_ENABLED = False
+    logging.warning("Matplotlib not found or display not available. Plotting will be skipped.")
+    
+
 from datetime import datetime
 
 # --- Paths ---
@@ -193,39 +204,12 @@ def sentiment_label_from_score(score):
         return 'Neutral'
 
 
-def plot_results(df, future_days=0, show=True):
-    plt.figure(figsize=(12, 6))
-    x = np.arange(len(df))
-    plt.plot(x, df['y_true'], label='Actual')
-    plt.plot(x, df['y_pred'], label='Base Predicted', linestyle='--')
-    plt.plot(x, df['combined_pred'], label='Combined Predicted', linestyle='-.')
-
-    # future projection from combined preds
-    if future_days > 0:
-        last = df['combined_pred'].iloc[-10:]
-        if len(last) >= 2:
-            trend = np.polyfit(np.arange(len(last)), last, 1)
-            future_x = np.arange(len(df), len(df) + future_days)
-            future_y = np.polyval(trend, np.arange(len(last), len(last) + future_days))
-            plt.plot(np.concatenate([x, future_x]), np.concatenate([df['combined_pred'], future_y]),
-                     label=f'{future_days}-step Forecast', linestyle=':')
-            plt.axvspan(len(df)-1, len(df)+future_days, color='lightgrey', alpha=0.25)
-
-    plt.title('Actual vs Base vs Combined Predictions')
-    plt.xlabel('Sample / Time step')
-    plt.ylabel('Price')
-    plt.legend()
-    plt.grid(True, linestyle='--', alpha=0.4)
-    plt.tight_layout()
-    if show:
-        plt.show()
-
-
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--future', type=int, default=0, help='Project N future steps')
+    # CHANGED DEFAULT: Plotting is now opt-in for server readiness
+    parser.add_argument('--plot', action='store_true', default=False, help='Show plot (requires display environment)')
     parser.add_argument('--retrain', action='store_true', help='Force retrain of combiner model')
-    parser.add_argument('--plot', action='store_true', default=True, help='Show plot')
     args = parser.parse_args()
 
     df_pred, df_sent = load_files()
@@ -253,9 +237,8 @@ def main():
     sentiment_overall = sentiment_label_from_score(df_feat['sentiment_score'].iloc[-1])
     logging.info(f'Final RMSE: {rmse:.6f} | Accuracy: {acc_pct:.2f}% | Confidence: {conf:.2f}% | Sentiment: {sentiment_overall}')
 
-    # annotate plot with metrics and sentiment
-    if args.plot:
-        # insert metrics text into figure
+    # Plotting is now conditional on the PLOTTING_ENABLED flag and --plot argument
+    if args.plot and PLOTTING_ENABLED:
         plt.figure(figsize=(12, 6))
         x = np.arange(len(out_df))
         plt.plot(x, out_df['y_true'], label='Actual')
@@ -283,7 +266,10 @@ def main():
         plt.legend()
         plt.grid(True, linestyle='--', alpha=0.4)
         plt.tight_layout()
-        plt.show()
+        # Save plot to file instead of showing it (best practice for server environment)
+        # We save it to a temporary file that a local user could inspect if needed.
+        plt.savefig(OUTPUT_DIR / "combined_predictions_plot.png")
+        logging.info(f"Saved plot to {OUTPUT_DIR}/combined_predictions_plot.png")
 
 
 if __name__ == '__main__':
