@@ -1,3 +1,5 @@
+# [Content of sentimental.py remains the same]
+# ... The sentimental.py content will be included here ...
 #!/usr/bin/env python3
 """
 sentimental.py — Web Sentiment Scraper + BERT Sentiment Analyzer

@@ -3,10 +3,14 @@ import subprocess
 import logging
 from datetime import datetime
 from pathlib import Path
+from typing import Optional
 
 import pandas as pd
+import numpy as np
+import io
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
+from sklearn.metrics import mean_squared_error
 
 # --- Configuration ---
 OUTPUT_DIR = Path("outputs")
@@ -31,7 +35,7 @@ class FinalVerdict(BaseModel):
     timestamp: datetime
     latest_prediction: float
     base_prediction: float
-    true_value: float = None
+    true_value: Optional[float] = None
     sentiment_score: float
     sentiment_label: str
     combined_rmse: float
@@ -46,6 +50,14 @@ class PipelineStatus(BaseModel):
     """Schema for the pipeline execution status."""
     success: bool
     log_output: str
+
+class DataUpload(BaseModel):
+    """Schema for receiving custom data and pipeline configuration."""
+    # Custom data as a raw CSV string
+    csv_content: str
+    target_column: str = 'close'
+    # Filename to save the custom data as in the data/ folder
+    filename: str = 'custom_input.csv'
 
 # --- Utility Functions ---
 
@@ -79,8 +91,6 @@ def run_script(script_name: str, args: list = []) -> str:
 
 def compute_metrics(y_true, y_pred):
     """Re-implementation of the compute_metrics from predictions.py"""
-    from sklearn.metrics import mean_squared_error
-    import numpy as np
     
     rmse = np.sqrt(mean_squared_error(y_true, y_pred))
     mean_val = np.mean(np.abs(y_true)) if np.mean(np.abs(y_true)) != 0 else 1.0
@@ -89,14 +99,58 @@ def compute_metrics(y_true, y_pred):
     conf = max(0.0, 100.0 * (1 - np.var(residuals) / (np.var(y_true) + 1e-9)))
     return rmse, accuracy_pct, conf
 
+def save_custom_csv(filename: str, csv_content: str):
+    """Saves the CSV content string received via API to the data directory."""
+    path = DATA_DIR / filename
+    try:
+        # Use StringIO to read the string content as if it were a file
+        df = pd.read_csv(io.StringIO(csv_content))
+        # Save the DataFrame to a file in the data/ folder
+        df.to_csv(path, index=False)
+        logging.info(f"Saved custom data to {path}")
+    except Exception as e:
+        logging.error(f"Failed to process/save custom CSV: {e}")
+        # Reraise as an HTTP error for the API consumer
+        raise HTTPException(status_code=400, detail=f"Invalid CSV content provided: {e}")
+
 # --- API Endpoints ---
+
+@app.post("/pipeline/run_with_custom_data", response_model=PipelineStatus)
+def run_pipeline_with_custom_data(upload: DataUpload):
+    """
+    Triggers the pipeline using custom data provided in the payload.
+    The custom data will be added to the data/ folder and included in model training.
+    """
+    full_log = ""
+    try:
+        # 1. Save Custom Data
+        save_custom_csv(upload.filename, upload.csv_content)
+        full_log += f"Saved custom data: {upload.filename} successfully.\n"
+        
+        # 2. Sentiment Analysis (Runs on live news)
+        log_sent = run_script("sentimental.py")
+        full_log += log_sent + "\n"
+        
+        # 3. Base Model Training (Will load ALL CSVs in data/ including custom_input.csv)
+        log_xgb = run_script("xgboost_model.py", ["--target", upload.target_column])
+        full_log += log_xgb + "\n"
+        
+        # 4. Final Prediction & Combine 
+        log_pred = run_script("predictions.py", ["--future", "30", "--retrain"])
+        full_log += log_pred + "\n"
+        
+        return PipelineStatus(success=True, log_output=full_log)
+    except Exception as e:
+        # If any script fails, return a failure status with the log up to the point of failure
+        return PipelineStatus(success=False, log_output=full_log + f"\n[CRITICAL FAILURE]: {e}")
+
 
 @app.post("/pipeline/run", response_model=PipelineStatus)
 def run_full_pipeline(target_col: str = 'close', start_date: str = '2015-01-01', end_date: str = datetime.now().strftime('%Y-%m-%d')):
-    """Triggers a full run of the data ingestion, sentiment, model training, and prediction pipeline."""
+    """Triggers a full run of the data ingestion (from public sources), sentiment, model training, and prediction pipeline."""
     full_log = ""
     try:
-        # 1. Data Ingestion
+        # 1. Data Ingestion (Uses external public data sources)
         log_data = run_script("data.py", ["--start", start_date, "--end", end_date])
         full_log += log_data + "\n"
         
@@ -109,7 +163,7 @@ def run_full_pipeline(target_col: str = 'close', start_date: str = '2015-01-01',
         full_log += log_xgb + "\n"
         
         # 4. Final Prediction & Combine (Explicitly run without plotting on the server)
-        log_pred = run_script("predictions.py", ["--future", "30", "--retrain"]) # Removed --plot
+        log_pred = run_script("predictions.py", ["--future", "30", "--retrain"])
         full_log += log_pred + "\n"
         
         return PipelineStatus(success=True, log_output=full_log)
@@ -134,7 +188,6 @@ def get_combined_predictions_timeseries():
         raise HTTPException(status_code=404, detail="Combined predictions not found. Run the pipeline first.")
     try:
         df = pd.read_csv(COMBO_PRED_FILE)
-        # Assuming the combined prediction file has enough info for timeseries.
         return TimeseriesData(data=df.to_dict(orient="records"))
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error reading combined predictions file: {e}")
@@ -163,11 +216,14 @@ def get_final_verdict():
         # Latest sentiment
         latest_sent_row = df_sent.iloc[-1]
         
+        # Handle cases where true_value might not be available (e.g., in a pure forecast)
+        true_val = float(latest_pred_row['y_true']) if 'y_true' in latest_pred_row and not pd.isna(latest_pred_row['y_true']) else None
+
         return FinalVerdict(
             timestamp=datetime.utcnow(),
             latest_prediction=float(latest_pred_row['combined_pred']),
             base_prediction=float(latest_pred_row['y_pred']),
-            true_value=float(latest_pred_row['y_true']),
+            true_value=true_val,
             sentiment_score=float(latest_sent_row['sentiment_score']),
             sentiment_label=str(latest_sent_row['sentiment_label']),
             combined_rmse=float(rmse),
@@ -177,16 +233,14 @@ def get_final_verdict():
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error processing final verdict: {e}")
 
-# If you use the API to start, you'll need the following block
+# If you use the API to start, you'll need the following block (as in the original code)
 if __name__ == "__main__":
     import uvicorn
-    # This assumes the API will be the entry point for the Render server
-    # Run the pipeline once on startup (blocking)
+    # Initial run to populate files (optional, but good for first boot)
     try:
-        run_full_pipeline(target_col='close') # Initial run to populate files
+        run_full_pipeline(target_col='close')
     except Exception as e:
         logging.error(f"Initial pipeline run failed: {e}")
-        # The API will still start but endpoints will return 404 until a run succeeds.
     
     # Use a fixed port 8000 for standard server deployments
     uvicorn.run(app, host="0.0.0.0", port=int(os.getenv("PORT", 8000)))

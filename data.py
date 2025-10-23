@@ -1,3 +1,5 @@
+# [Content of data.py remains the same]
+# ... The data.py content will be included here ...
 """
 Veda — Improved Data ingestion pipeline (single-file script)
 
@@ -507,4 +509,3 @@ if __name__ == '__main__':
     parser.add_argument('--end', default=datetime.now(timezone.utc).strftime('%Y-%m-%d'))
     args = parser.parse_args()
     main(args)
-

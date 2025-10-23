@@ -1,3 +1,5 @@
+# [Content of predictions.py remains the same]
+# ... The predictions.py content will be included here ...
 #!/usr/bin/env python3
 """
 predictions.py — Combine XGBoost predictions with sentiment and produce final verdict
@@ -189,8 +191,11 @@ def fallback_ensemble(df):
 def compute_metrics(y_true, y_pred):
     rmse = np.sqrt(mean_squared_error(y_true, y_pred))
     mean_val = np.mean(np.abs(y_true)) if np.mean(np.abs(y_true)) != 0 else 1.0
-    accuracy_pct = max(0.0, 100.0 * (1 - rmse / mean_val))
+    progress_ratio = rmse / mean_val
+    # Max accuracy is 100%, based on (1 - scaled_error)
+    accuracy_pct = max(0.0, 100.0 * (1 - progress_ratio)) 
     residuals = np.abs(y_true - y_pred)
+    # Confidence: low variance in residuals relative to variance of true values means high confidence
     conf = max(0.0, 100.0 * (1 - np.var(residuals) / (np.var(y_true) + 1e-9)))
     return rmse, accuracy_pct, conf
 
